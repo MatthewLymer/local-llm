@@ -13,9 +13,9 @@
 #   1. Find your GPU render group GID:
 #        stat -c "%g" /dev/dri/render*
 #   2. Start the stack:
-#        RENDER_GROUP_GID=<gid> docker compose up -d
+#        RENDER_GROUP_GID=<gid> docker compose -f compose.ovms.yml up -d
 #   3. First startup downloads the model — check progress with:
-#        docker compose logs -f ovms
+#        docker compose -f compose.ovms.yml logs -f ovms
 #   4. Configure Claude Code (see bottom of this file for env vars)
 #
 # =============================================================================
@@ -46,7 +46,7 @@
 #                        Default: 4000
 #
 # LITELLM_API_KEY      - API key LiteLLM expects (set the same in Claude Code)
-#                        Default: sk-local-dev
+#                        Default: sk-local
 #
 # HF_TOKEN             - HuggingFace token (only needed for gated models)
 #                        Default: (none)
@@ -76,14 +76,14 @@ services:
       - HTTPS_PROXY=${HTTPS_PROXY:-}
       - HTTP_PROXY=${HTTP_PROXY:-}
       - NO_PROXY=${NO_PROXY:-}
-    # docker compose run ovms --add_to_config --config_path /models/config.json --model_name qwen3-8b --source_model OpenVINO/Qwen3-8B-Instruct-int4-ov --model_repository_path /models
+    # docker compose -f compose.ovms.yml run ovms --add_to_config --config_path /models/config.json --model_name qwen3-8b --source_model OpenVINO/Qwen3-8B-Instruct-int4-ov --model_repository_path /models
     command: >-
       --source_model ${OVMS_SOURCE_MODEL:-OpenVINO/Qwen3-8B-Instruct-int4-ov}
       --config_path /models/config.json
       --model_repository_path /models
       --target_device GPU
       --rest_port 8000
-      
+
     #  --pull
     # --plugin_config '{"KV_CACHE_PRECISION":"u8","DYNAMIC_QUANTIZATION_GROUP_SIZE":"32"}'
     # --model_name ${OVMS_MODEL_NAME:-qwen3-8b}
@@ -135,7 +135,7 @@ services:
         YAML
         exec litellm --config /tmp/config.yaml --port 4000
     environment:
-      LITELLM_MASTER_KEY: "${LITELLM_API_KEY:-sk-local-dev}"
+      LITELLM_MASTER_KEY: "${LITELLM_API_KEY:-sk-local}"
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:4000/health || exit 1"]
       interval: 15s
@@ -153,12 +153,8 @@ volumes:
 # CLAUDE CODE CONFIGURATION
 # =============================================================================
 #
-# Add these environment variables before launching Claude Code:
-#
 #   export ANTHROPIC_BASE_URL=http://localhost:4000
-#   export ANTHROPIC_API_KEY=sk-local-dev
-#
-# Or add to your shell profile (~/.bashrc, ~/.zshrc) for persistence.
+#   export ANTHROPIC_API_KEY=sk-local
 #
 # =============================================================================
 # USEFUL ENDPOINTS
@@ -175,11 +171,11 @@ volumes:
 #
 # List models via LiteLLM:
 #   curl http://localhost:4000/v1/models \
-#     -H "Authorization: Bearer sk-local-dev"
+#     -H "Authorization: Bearer sk-local"
 #
 # Test chat completion (OpenAI format via LiteLLM):
 #   curl http://localhost:4000/v1/chat/completions \
-#     -H "Authorization: Bearer sk-local-dev" \
+#     -H "Authorization: Bearer sk-local" \
 #     -H "Content-Type: application/json" \
 #     -d '{"model": "local-model", "messages": [{"role": "user", "content": "Hello"}]}'
 #
@@ -188,7 +184,7 @@ volumes:
 # =============================================================================
 #
 # 1. Stop the stack:
-#      docker compose down
+#      docker compose -f compose.ovms.yml down
 #
 # 2. Set the new model (browse https://huggingface.co/OpenVINO for options):
 #      export OVMS_SOURCE_MODEL=OpenVINO/Qwen3-14B-Instruct-int4-ov
@@ -198,7 +194,7 @@ volumes:
 #      export OVMS_CACHE_SIZE_GB=6
 #
 # 4. Restart:
-#      docker compose up -d
+#      docker compose -f compose.ovms.yml up -d
 #
 # The new model downloads automatically on first start.
 # Previously downloaded models remain in the volume.
@@ -222,7 +218,7 @@ volumes:
 #   - With u8 KV cache precision (configured above), memory per token is halved
 #
 # To verify actual capacity, check OVMS logs after startup:
-#   docker compose logs ovms | grep -i "cache\|capacity\|context"
+#   docker compose -f compose.ovms.yml logs ovms | grep -i "cache\|capacity\|context"
 #
 # =============================================================================
 # SUPPORTED MODELS (OVMS on Intel GPU)

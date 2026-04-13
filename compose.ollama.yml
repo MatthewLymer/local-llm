@@ -1,0 +1,103 @@
+services:
+  ollama:
+    image: intelanalytics/ipex-llm-inference-cpp-xpu:latest
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+      # Required for Intel GPU driver access in WSL2
+      - /usr/lib/wsl:/usr/lib/wsl
+    devices:
+      # - /dev/dri:/dev/dri
+      - /dev/dxg:/dev/dxg
+    environment:
+      - DEVICE=Arc
+      - no_proxy=localhost,127.0.0.1
+      - OLLAMA_DEBUG=1
+      - OLLAMA_KEEP_ALIVE=-1 # keep model in memory after 5m of inactivity
+      # Arc A770 performance tuning
+      - SYCL_CACHE_PERSISTENT=1
+      - BIGDL_LLM_XMX_DISABLED=0
+      - OLLAMA_HOST=0.0.0.0:11434
+      - OLLAMA_CONTEXT_LENGTH=49152
+      # - OLLAMA_MAX_LOADED_MODELS=1 # https://github.com/intel/ipex-llm/issues/12761#issuecomment-2651993166
+    shm_size: "16g"
+    command:
+      - bash
+      - -c
+      - >
+        cd /llm/scripts &&
+        source ipex-llm-init --gpu --device Arc &&
+        bash start-ollama.sh &&
+        tail -f /llm/ollama/ollama.log
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+
+  model-puller:
+    image: curlimages/curl:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    # Pulls Qwen2.5-1.5B-Instruct Q8_0 (8-bit) GGUF from HuggingFace via ollama
+    command:
+      - -X
+      - POST
+      - http://ollama:11434/api/pull
+      - -H
+      - "Content-Type: application/json"
+      - -d
+      - '{"name": "hf.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF:Q4_K_M"}'
+      - --no-buffer
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    ports:
+      - "4000:4000"
+    environment:
+      LITELLM_CONFIG: |
+        model_list:
+          - model_name: "*"
+            litellm_params:
+              # model: ollama/hf.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF:Q8_0
+              # model: ollama/hf.co/continuum-ai/qwen3-coder-30b-a3b-compacted-19b-256k:Q4_K_M
+              # model: ollama/hf.co/unsloth/Qwen3.5-9B-GGUF:Q4_K_M
+              # model: ollama/hf.co/bartowski/Qwen2.5-Coder-7B-Instruct-GGUF:Q5_K_M
+              # model: ollama/hf.co/bartowski/Qwen2.5-7B-Instruct-1M-GGUF:Q4_K_M
+              # model: ollama_chat/hf.co/bartowski/Qwen2.5-7B-Instruct-1M-GGUF:Q4_K_M # using the ollama_chat endpoint is necessary for Claude Code to not see JSON responses!
+              # model: ollama/hf.co/Qwen/Qwen2.5-Coder-14B-Instruct-GGUF:Q4_K_M
+              # model: ollama/hf.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF:Q4_K_M
+              model: docker_model_runner/docker.io/gemma3:4B-Q4_K_M
+              # api_base: http://ollama:11434
+              api_base: http://host.docker.internal:12434/engines/llama.cpp
+              num_ctx: 49152
+              stream: true
+              # supports_function_calling: true
+
+        litellm_settings:
+          master_key: sk-local
+          drop_params: true
+          modify_params: true
+          set_verbose: true
+
+    entrypoint:
+      - sh
+      - -c
+      - 'printf "%s" "$$LITELLM_CONFIG" > /tmp/config.yaml && exec litellm --config /tmp/config.yaml --port 4000' # --detailed_debug
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+  port-forwarder:
+    image: alpine/socat
+    ports:
+      - 12435:1234/tcp
+    command:
+      - TCP-LISTEN:1234,fork,reuseaddr
+      - TCP:host.docker.internal:12434
+
+volumes:
+  ollama-data:
