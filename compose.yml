@@ -1,0 +1,240 @@
+# =============================================================================
+# Local OpenVINO Model Server (OVMS) for Claude Code
+# =============================================================================
+#
+# Architecture:
+#   Claude Code -> LiteLLM (Anthropic API proxy) -> OVMS (Intel GPU inference)
+#
+# OVMS exposes an OpenAI-compatible API (/v3), but Claude Code requires the
+# Anthropic Messages API (/v1/messages). LiteLLM bridges this gap by accepting
+# Anthropic-format requests and translating them to OpenAI format for OVMS.
+#
+# Quick Start:
+#   1. Find your GPU render group GID:
+#        stat -c "%g" /dev/dri/render*
+#   2. Start the stack:
+#        RENDER_GROUP_GID=<gid> docker compose up -d
+#   3. First startup downloads the model — check progress with:
+#        docker compose logs -f ovms
+#   4. Configure Claude Code (see bottom of this file for env vars)
+#
+# =============================================================================
+# CONFIGURATION — override these with environment variables or a .env file
+# =============================================================================
+#
+# RENDER_GROUP_GID     - GID of /dev/dri/renderD* (find with: stat -c "%g" /dev/dri/render*)
+#                        Default: 109 (common on Ubuntu)
+#
+# OVMS_SOURCE_MODEL    - HuggingFace model ID (OpenVINO IR format recommended)
+#                        Default: OpenVINO/Qwen3-8B-Instruct-int4-ov
+#                        Alternatives:
+#                          OpenVINO/Qwen3-14B-Instruct-int4-ov  (~8GB, stronger but slower)
+#                          OpenVINO/Qwen3-4B-Instruct-int4-ov   (~2.5GB, faster but weaker)
+#                        Browse: https://huggingface.co/OpenVINO
+#
+# OVMS_MODEL_NAME      - Name exposed via the API (used in LiteLLM routing)
+#                        Default: qwen3-8b
+#
+# OVMS_CACHE_SIZE_GB   - KV cache memory in GB (VRAM budget minus model size)
+#                        Default: 8 (suitable for 16GB A770 with ~5GB int4 model)
+#                        Larger = more context / concurrent requests
+#
+# OVMS_PORT            - Host port for direct OVMS access (optional, for debugging)
+#                        Default: 11434
+#
+# LITELLM_PORT         - Host port for the Anthropic-compatible proxy
+#                        Default: 4000
+#
+# LITELLM_API_KEY      - API key LiteLLM expects (set the same in Claude Code)
+#                        Default: sk-local-dev
+#
+# HF_TOKEN             - HuggingFace token (only needed for gated models)
+#                        Default: (none)
+#
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # OVMS — Intel GPU inference engine
+  # ---------------------------------------------------------------------------
+  # Serves an OpenAI-compatible API at /v3/chat/completions
+  # Auto-downloads models from HuggingFace on first run, caches in volume
+  # ---------------------------------------------------------------------------
+  ovms:
+    image: openvino/model_server:latest-gpu
+    devices:
+      - /dev/dxg:/dev/dxg
+    # group_add:
+    #   - "${RENDER_GROUP_GID:-109}"
+    volumes:
+      - model-cache:/models
+    user: root
+    ports:
+      - "${OVMS_PORT:-11434}:8000"
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - HTTPS_PROXY=${HTTPS_PROXY:-}
+      - HTTP_PROXY=${HTTP_PROXY:-}
+      - NO_PROXY=${NO_PROXY:-}
+    # docker compose run ovms --add_to_config --config_path /models/config.json --model_name qwen3-8b --source_model OpenVINO/Qwen3-8B-Instruct-int4-ov --model_repository_path /models
+    command: >-
+      --source_model ${OVMS_SOURCE_MODEL:-OpenVINO/Qwen3-8B-Instruct-int4-ov}
+      --config_path /models/config.json
+      --model_repository_path /models
+      --target_device GPU
+      --rest_port 8000
+      
+    #  --pull
+    # --plugin_config '{"KV_CACHE_PRECISION":"u8","DYNAMIC_QUANTIZATION_GROUP_SIZE":"32"}'
+    # --model_name ${OVMS_MODEL_NAME:-qwen3-8b}
+    # --model_path /models
+    # --cache_size ${OVMS_CACHE_SIZE_GB:-8}
+    # --enable_prefix_caching true
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/v2/health/ready || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+      start_period: 600s
+
+  # ---------------------------------------------------------------------------
+  # LiteLLM — Anthropic-to-OpenAI API translation proxy
+  # ---------------------------------------------------------------------------
+  # Accepts Anthropic Messages API requests (POST /v1/messages) from Claude
+  # Code and translates them to OpenAI Chat Completions format for OVMS.
+  # ---------------------------------------------------------------------------
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    ports:
+      - "${LITELLM_PORT:-4000}:4000"
+    depends_on:
+      ovms:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        cat > /tmp/config.yaml <<'YAML'
+        model_list:
+          - model_name: "local-model"
+            litellm_params:
+              model: "openai/${OVMS_MODEL_NAME:-qwen3-8b}"
+              api_base: "http://ovms:8000/v3"
+              api_key: "unused"
+              stream_timeout: 300
+              timeout: 300
+
+        model_group_alias:
+          "claude-sonnet-4-20250514": "local-model"
+          "claude-sonnet-4-6-20250514": "local-model"
+          "claude-opus-4-20250514": "local-model"
+          "claude-opus-4-6-20250514": "local-model"
+          "claude-haiku-3-5-20241022": "local-model"
+          "claude-haiku-4-5-20251001": "local-model"
+          "claude-sonnet-4-20250514[1m]": "local-model"
+          "claude-opus-4-6[1m]": "local-model"
+        YAML
+        exec litellm --config /tmp/config.yaml --port 4000
+    environment:
+      LITELLM_MASTER_KEY: "${LITELLM_API_KEY:-sk-local-dev}"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:4000/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+# =============================================================================
+# Persistent storage — named volume (no bind mount, better I/O performance)
+# =============================================================================
+volumes:
+  model-cache:
+
+# =============================================================================
+# CLAUDE CODE CONFIGURATION
+# =============================================================================
+#
+# Add these environment variables before launching Claude Code:
+#
+#   export ANTHROPIC_BASE_URL=http://localhost:4000
+#   export ANTHROPIC_API_KEY=sk-local-dev
+#
+# Or add to your shell profile (~/.bashrc, ~/.zshrc) for persistence.
+#
+# =============================================================================
+# USEFUL ENDPOINTS
+# =============================================================================
+#
+# List installed models (OVMS direct):
+#   curl http://localhost:11434/v3/models
+#
+# Health check (OVMS):
+#   curl http://localhost:11434/v2/health/ready
+#
+# Health check (LiteLLM):
+#   curl http://localhost:4000/health
+#
+# List models via LiteLLM:
+#   curl http://localhost:4000/v1/models \
+#     -H "Authorization: Bearer sk-local-dev"
+#
+# Test chat completion (OpenAI format via LiteLLM):
+#   curl http://localhost:4000/v1/chat/completions \
+#     -H "Authorization: Bearer sk-local-dev" \
+#     -H "Content-Type: application/json" \
+#     -d '{"model": "local-model", "messages": [{"role": "user", "content": "Hello"}]}'
+#
+# =============================================================================
+# CHANGING MODELS
+# =============================================================================
+#
+# 1. Stop the stack:
+#      docker compose down
+#
+# 2. Set the new model (browse https://huggingface.co/OpenVINO for options):
+#      export OVMS_SOURCE_MODEL=OpenVINO/Qwen3-14B-Instruct-int4-ov
+#      export OVMS_MODEL_NAME=qwen3-14b
+#
+# 3. Adjust KV cache if needed (16GB VRAM minus model size):
+#      export OVMS_CACHE_SIZE_GB=6
+#
+# 4. Restart:
+#      docker compose up -d
+#
+# The new model downloads automatically on first start.
+# Previously downloaded models remain in the volume.
+#
+# =============================================================================
+# CONTEXT SIZE TUNING
+# =============================================================================
+#
+# Context capacity is governed by OVMS_CACHE_SIZE_GB — the KV cache budget.
+# More cache = longer context windows and/or more concurrent sequences.
+#
+# For the Intel Arc A770 (16GB VRAM):
+#   Model (int4)     | Model Size | Recommended OVMS_CACHE_SIZE_GB
+#   -----------------|------------|-------------------------------
+#   Qwen3-4B         |   ~2.5 GB  | 10-12
+#   Qwen3-8B         |   ~5.0 GB  | 8-10
+#   Qwen3-14B        |   ~8.0 GB  | 5-7
+#
+# The effective max context length also depends on the model's architecture:
+#   - Qwen3-8B supports up to 32,768 tokens natively
+#   - With u8 KV cache precision (configured above), memory per token is halved
+#
+# To verify actual capacity, check OVMS logs after startup:
+#   docker compose logs ovms | grep -i "cache\|capacity\|context"
+#
+# =============================================================================
+# SUPPORTED MODELS (OVMS on Intel GPU)
+# =============================================================================
+#
+# OVMS works best with pre-converted OpenVINO IR models from HuggingFace.
+# Browse: https://huggingface.co/OpenVINO
+#
+# GGUF support is limited to: Qwen2/2.5/3, Llama3, DeepSeek-R1-Distill
+# (Gemma, Mistral, and other architectures are NOT supported as GGUF)
+#
+# For Claude Code, models with strong tool-calling are essential.
+# Recommended: Qwen3 family (excellent instruction following + tool use)
+#
+# =============================================================================
