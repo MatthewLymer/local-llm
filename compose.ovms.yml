@@ -15,7 +15,7 @@
 #   2. Start the stack:
 #        RENDER_GROUP_GID=<gid> docker compose -f compose.ovms.yml up -d
 #   3. First startup downloads the model — check progress with:
-#        docker compose -f compose.ovms.yml logs -f ovms
+#        docker compose -f compose.ovms.yml logs -f model-downloader
 #   4. Configure Claude Code (see bottom of this file for env vars)
 #
 # =============================================================================
@@ -25,12 +25,11 @@
 # RENDER_GROUP_GID     - GID of /dev/dri/renderD* (find with: stat -c "%g" /dev/dri/render*)
 #                        Default: 109 (common on Ubuntu)
 #
-# OVMS_SOURCE_MODEL    - HuggingFace model ID (OpenVINO IR format recommended)
-#                        Default: OpenVINO/Qwen3-8B-Instruct-int4-ov
-#                        Alternatives:
-#                          OpenVINO/Qwen3-14B-Instruct-int4-ov  (~8GB, stronger but slower)
-#                          OpenVINO/Qwen3-4B-Instruct-int4-ov   (~2.5GB, faster but weaker)
-#                        Browse: https://huggingface.co/OpenVINO
+# GGUF_REPO            - HuggingFace repo containing the GGUF model file
+#                        Default: Qwen/Qwen3-8B-GGUF
+#
+# GGUF_FILE            - Filename of the GGUF model within the repo
+#                        Default: Qwen3-8B-Q4_0.gguf
 #
 # OVMS_MODEL_NAME      - Name exposed via the API (used in LiteLLM routing)
 #                        Default: qwen3-8b
@@ -55,13 +54,52 @@
 
 services:
   # ---------------------------------------------------------------------------
+  # model-downloader — fetches the GGUF from HuggingFace before OVMS starts
+  # ---------------------------------------------------------------------------
+  # Skips the download if the file already exists in the volume (idempotent).
+  # ---------------------------------------------------------------------------
+  model-downloader:
+    image: python:3.11-slim
+    volumes:
+      - model-cache:/models
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+      - GGUF_REPO=${GGUF_REPO:-Qwen/Qwen3-8B-GGUF}
+      - GGUF_FILE=${GGUF_FILE:-Qwen3-8B-Q4_0.gguf}
+    command:
+      - sh
+      - -c
+      - |
+        DEST="/models/${OVMS_MODEL_NAME:-qwen3-8b}/$$GGUF_FILE"
+        if [ -f "$$DEST" ]; then
+          echo "Model already present at $$DEST, skipping download."
+          exit 0
+        fi
+        pip install -q huggingface_hub
+        mkdir -p "/models/${OVMS_MODEL_NAME:-qwen3-8b}"
+        python - <<'PY'
+        import os
+        from huggingface_hub import hf_hub_download
+        dest_dir = f"/models/{os.environ.get('OVMS_MODEL_NAME', 'qwen3-8b')}"
+        path = hf_hub_download(
+          repo_id=os.environ["GGUF_REPO"],
+          filename=os.environ["GGUF_FILE"],
+          local_dir=dest_dir,
+          token=os.environ.get("HF_TOKEN") or None,
+        )
+        print(f"Downloaded to {path}")
+        PY
+
+  # ---------------------------------------------------------------------------
   # OVMS — Intel GPU inference engine
   # ---------------------------------------------------------------------------
   # Serves an OpenAI-compatible API at /v3/chat/completions
-  # Auto-downloads models from HuggingFace on first run, caches in volume
   # ---------------------------------------------------------------------------
   ovms:
     image: openvino/model_server:latest-gpu
+    depends_on:
+      model-downloader:
+        condition: service_completed_successfully
     devices:
       - /dev/dxg:/dev/dxg
     # group_add:
@@ -72,22 +110,17 @@ services:
     ports:
       - "${OVMS_PORT:-11434}:8000"
     environment:
-      - HF_TOKEN=${HF_TOKEN:-}
       - HTTPS_PROXY=${HTTPS_PROXY:-}
       - HTTP_PROXY=${HTTP_PROXY:-}
       - NO_PROXY=${NO_PROXY:-}
-    # docker compose -f compose.ovms.yml run ovms --add_to_config --config_path /models/config.json --model_name qwen3-8b --source_model OpenVINO/Qwen3-8B-Instruct-int4-ov --model_repository_path /models
     command: >-
-      --source_model ${OVMS_SOURCE_MODEL:-OpenVINO/Qwen3-8B-Instruct-int4-ov}
-      --config_path /models/config.json
+      --source_model /models/${OVMS_MODEL_NAME:-qwen3-8b}/${GGUF_FILE:-Qwen3-8B-Q4_0.gguf}
+      --model_name ${OVMS_MODEL_NAME:-qwen3-8b}
       --model_repository_path /models
       --target_device GPU
       --rest_port 8000
 
-    #  --pull
     # --plugin_config '{"KV_CACHE_PRECISION":"u8","DYNAMIC_QUANTIZATION_GROUP_SIZE":"32"}'
-    # --model_name ${OVMS_MODEL_NAME:-qwen3-8b}
-    # --model_path /models
     # --cache_size ${OVMS_CACHE_SIZE_GB:-8}
     # --enable_prefix_caching true
     healthcheck:
@@ -186,17 +219,14 @@ volumes:
 # 1. Stop the stack:
 #      docker compose -f compose.ovms.yml down
 #
-# 2. Set the new model (browse https://huggingface.co/OpenVINO for options):
-#      export OVMS_SOURCE_MODEL=OpenVINO/Qwen3-14B-Instruct-int4-ov
+# 2. Set the new model:
+#      export GGUF_REPO=Qwen/Qwen3-14B-GGUF
+#      export GGUF_FILE=Qwen3-14B-Q4_0.gguf
 #      export OVMS_MODEL_NAME=qwen3-14b
 #
-# 3. Adjust KV cache if needed (16GB VRAM minus model size):
-#      export OVMS_CACHE_SIZE_GB=6
-#
-# 4. Restart:
+# 3. Restart (model-downloader will fetch the new file automatically):
 #      docker compose -f compose.ovms.yml up -d
 #
-# The new model downloads automatically on first start.
 # Previously downloaded models remain in the volume.
 #
 # =============================================================================
