@@ -26,10 +26,10 @@
 #                        Default: 109 (common on Ubuntu)
 #
 # OVMS_SOURCE_MODEL    - HuggingFace repo ID for the OpenVINO IR model
-#                        Default: OpenVINO/Qwen3-8B-Instruct-int4-ov
+#                        Default: OpenVINO/Qwen3-8B-int4-ov
 #                        Alternatives:
-#                          OpenVINO/Qwen3-14B-Instruct-int4-ov  (~8GB, stronger but slower)
-#                          OpenVINO/Qwen3-4B-Instruct-int4-ov   (~2.5GB, faster but weaker)
+#                          OpenVINO/Qwen3-14B-int4-ov  (~8GB, stronger but slower)
+#                          OpenVINO/Qwen3-4B-int4-ov   (~2.5GB, faster but weaker)
 #                        Browse: https://huggingface.co/OpenVINO
 #
 # OVMS_MODEL_NAME      - Name exposed via the API (used in LiteLLM routing)
@@ -64,7 +64,7 @@ services:
       - model-cache:/models
     environment:
       - HF_TOKEN=${HF_TOKEN:-}
-      - OVMS_SOURCE_MODEL=${OVMS_SOURCE_MODEL:-OpenVINO/Qwen3-8B-Instruct-int4-ov}
+      - OVMS_SOURCE_MODEL=${OVMS_SOURCE_MODEL:-OpenVINO/Qwen3-8B-int4-ov}
     command:
       - sh
       - -c
@@ -113,7 +113,7 @@ services:
       - HTTP_PROXY=${HTTP_PROXY:-}
       - NO_PROXY=${NO_PROXY:-}
     command: >-
-      --source_model /models/${OVMS_SOURCE_MODEL:-OpenVINO/Qwen3-8B-Instruct-int4-ov}
+      --source_model /models/${OVMS_SOURCE_MODEL:-OpenVINO/Qwen3-8B-int4-ov}
       --config_path /models/config.json
       --model_repository_path /models
       --target_device GPU
@@ -221,7 +221,7 @@ volumes:
 #      docker compose -f compose.ovms.yml down
 #
 # 2. Set the new model (browse https://huggingface.co/OpenVINO for options):
-#      export OVMS_SOURCE_MODEL=OpenVINO/Qwen3-14B-Instruct-int4-ov
+#      export OVMS_SOURCE_MODEL=OpenVINO/Qwen3-14B-int4-ov
 #      export OVMS_MODEL_NAME=qwen3-14b
 #
 # 3. Restart (model-downloader will fetch the new model automatically):
