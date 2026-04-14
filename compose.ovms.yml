@@ -69,6 +69,7 @@ services:
       - sh
       - -c
       - |
+        exit 0
         DEST="/models/$$OVMS_SOURCE_MODEL"
         if [ -d "$$DEST" ] && [ -n "$(ls -A $$DEST 2>/dev/null)" ]; then
           echo "Model already present at $$DEST, skipping download."
@@ -114,7 +115,8 @@ services:
       - NO_PROXY=${NO_PROXY:-}
     command: >-
       --source_model /models/${OVMS_SOURCE_MODEL:-OpenVINO/Qwen3-8B-int4-ov}
-      --config_path /models/config.json
+      --model_name ${OVMS_MODEL_NAME:-qwen3-8b}
+      --model_path /models
       --model_repository_path /models
       --target_device GPU
       --rest_port 8000
